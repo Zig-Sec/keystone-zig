@@ -4,12 +4,12 @@ const builtin = @import("builtin");
 const log = std.log.scoped(.Build);
 
 pub fn build(b: *std.Build) !void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-
-    const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
 
     const upstream = b.dependency("keystone", .{});
     const build_path = upstream.path("build");
@@ -21,17 +21,11 @@ pub fn build(b: *std.Build) !void {
     };
 
     const translate = b.addTranslateC(.{
-        .root_source_file = b.path("zig-out/include/keystone/keystone.h"),
+        .root_source_file = upstream.path("include/keystone/keystone.h"),
         .target = target,
         .optimize = optimize,
     });
-
-    const lib = b.addStaticLibrary(.{
-        .name = "keystone",
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
+    translate.addIncludeDir(try upstream.path("include").getPath3(upstream.builder, &translate.step).joinString(alloc, ""));
 
     const cmake_step = b.addSystemCommand(&.{
         if (builtin.os.tag == .linux)
@@ -43,19 +37,24 @@ pub fn build(b: *std.Build) !void {
         "lib_only",
     });
     cmake_step.setCwd(upstream.path("build"));
-    lib.step.dependOn(&cmake_step.step);
 
-    lib.installHeadersDirectory(upstream.path("include/keystone"), "keystone", .{});
+    translate.step.dependOn(&cmake_step.step);
+    b.getInstallStep().dependOn(&cmake_step.step);
 
-    const lib_copy = b.addObjCopy(build_path.path(upstream.builder, "llvm/lib64/"), .{ .basename = "keystone" });
-    lib_copy.step.dependOn(&cmake_step.step);
-    translate.step.dependOn(&lib_copy.step);
-
-    _ = b.addModule("keystone-c", .{
+    const mod = b.addModule("keystone-c", .{
         .root_source_file = translate.getOutput(),
         .link_libc = true,
         .link_libcpp = true,
+        .target = target,
+        .optimize = optimize,
     });
 
-    b.installArtifact(lib);
+    mod.addIncludePath(upstream.path("include/keystone"));
+    mod.addLibraryPath(build_path.path(upstream.builder, "llvm/lib64"));
+
+    // TODO: Eventually make the link mode configurable.
+    mod.linkSystemLibrary("keystone", .{
+        .needed = true,
+        .preferred_link_mode = .static,
+    });
 }
